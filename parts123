@@ -1,0 +1,1094 @@
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(corrplot)
+library(doParallel)
+library(forecast)
+library(knitr)
+library(missForest)
+library(DescTools)
+getwd()
+setwd("/Users/rachellevy/Desktop/School/422/Charity Project Part 1")
+
+miss.flag = function(df, df.cn = c("num", "fac")){
+  # Check for columns to apply
+  if (missing(df.cn)){
+    cols = colnames(df)
+  } else if (df.cn == "num"){
+    cols = colnames(df[, !sapply(df, is.factor)])
+  } else if (df.cn == "fac"){
+    cols = colnames(df[, sapply(df, is.factor)])
+  }
+  # Apply function
+  for (i in cols){
+    if (sum(is.na(df[, i])) > 0){
+      df[paste("MF", i, sep = "_")] =
+        as.factor(ifelse(is.na(df[, i]), 1, 0))
+    }
+  }
+  return(df)
+}
+
+########################################
+## Exercise 1
+## Read Data from CSV File
+########################################
+inPath = file.path("/Users/rachellevy/Desktop/School/422/Charity Project Part 1")
+regData = read.csv(file.path(inPath,"projectDataPart1.csv"),na.strings=c("NA"," "), stringsAsFactors = TRUE)
+
+# Convert categorical variables to factors
+#these are integer values, but factor variables, these commands ensure that
+regData$DONR = as.factor(regData$DONR)
+regData$HOME = as.factor(regData$HOME)
+regData$HINC = as.factor(regData$HINC)
+
+
+########################################
+## Exercise 2
+## Data Quality Check
+########################################
+
+dim(regData)      # dimensions of data
+names(regData)    # variable names
+str(regData)      # one form of summary of data
+summary(regData)  # another form of summary
+
+which(sapply(regData,anyNA))
+
+# Missing values identified in HINC, GENDER, and RFA_96
+# Get counts of missing values for each variable
+table(regData$HINC,useNA="ifany")
+table(regData$GENDER,useNA="ifany")
+table(regData$RFA_96,useNA="ifany")
+
+#check for ID duplicates
+anyDuplicated(regData$ID)
+# Assign ID as index
+rownames(regData) <- regData$ID
+# Drop ID
+regData <- subset(regData, select = -ID)
+
+# Assign temp data.frame() IFF variables are not factors
+temp <- regData[, !sapply(regData, is.factor)]
+# Use apply, but must transpose as it produces a 2x7 matrix
+temp <- t(apply(temp, 2, function(x) range(x)))
+# Add column names
+colnames(temp) <- c("Min", "Max")
+# Round to two digits, then remove temp
+round(temp, digits = 2); rm(temp)
+
+
+########################################
+## Exercise 3
+## Exploratory Data Analysis
+########################################
+library(car)
+fit <- lm(DAMT~AGE+HOME+HINC+GENDER+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON, data=regData)
+outlierTest(fit)
+qqPlot(fit, main = "QQ Plot")
+vif(fit)
+# Evaluate Nonlinearity
+# component + residual plot 
+crPlots(fit)
+# Ceres plots 
+ceresPlots(fit)
+# Normality of Residuals
+# qq plot for studentized resid
+qqPlot(fit, main="QQ Plot")
+# distribution of studentized residuals
+library(MASS)
+sresid <- studres(fit) 
+hist(sresid, freq=FALSE, 
+     main="Distribution of Studentized Residuals")
+xfit<-seq(min(sresid),max(sresid),length=40) 
+yfit<-dnorm(xfit) 
+lines(xfit, yfit)
+
+# Cook's D plot
+# identify D values > 4/(n-k-1) 
+cutoff <- 4/((nrow(mtcars)-length(fit$coefficients)-2)) 
+plot(fit, which=4, cook.levels=cutoff)
+# Influence Plot 
+influencePlot(fit,	id.method="identify", main="Influence Plot", sub="Circle size is proportial to Cook's Distance" )
+# Assessing Outliers
+outlierTest(fit) # Bonferonni p-value for most extreme obs
+qqPlot(fit, main="QQ Plot") #qq plot for studentized resid 
+leveragePlots(fit) # leverage plots
+
+# Histogram of the response variable DAMT
+hist(regData$DAMT,col="blue",breaks=20)
+
+# Get counts for a categorical variable
+table(regData$GENDER,useNA="ifany")
+
+# Barplot of a categorical variable
+barplot(table(regData$GENDER,useNA="ifany"),main="Gender")
+barplot(table(regData$HOME, useNA = "ifany"),main = "Homeowner")
+# Boxplot of donation amount by gender
+plot(regData$GENDER,regData$DAMT,xlab="Gender",ylab="Donation ($)")
+plot(regData$HINC,regData$DAMT,xlab="Household Income Categories",ylab="Donation ($)")
+# Plot response against a quantitative variable
+plot(regData$AGE,regData$DAMT,xlab="Age",ylab="Donation ($)")
+#Median Household income and Donation Amount
+plot(regData$MEDINC,regData$DAMT,xlab="Household Income",ylab="Donation ($)")
+lm_age = lm(DAMT ~ MEDINC, data=regData)
+abline(lm_age,col="red")
+#Median Home Value (In Hundreds) and Donation Amount
+plot(regData$MEDHVAL,regData$DAMT,xlab="Median Home Value in Hundreds",ylab="Donation ($)")
+lm_age = lm(DAMT ~ MEDHVAL, data=regData)
+abline(lm_age,col="red")
+#Median Years of Education and Donation Amount
+plot(regData$MEDEDUC/10,regData$DAMT,xlab="Years of Education",ylab="Donation ($)")
+lm_age = lm(DAMT ~ MEDEDUC, data=regData)
+abline(lm_age,col="red")
+#group all of the  variables
+par(mfrow=c(1,1))
+regData.donr.cn.all <- grep("^MF_", colnames(regData), value = T, invert = T)
+
+regData.donr.cn.fac <- grep("^MF_", 
+                         colnames(regData[, sapply(regData, is.factor)]),
+                         value = T, invert = T)
+regData.donr.cn.num <- grep("^MF_",
+                         colnames(regData[, !sapply(regData, is.factor)]),
+                         value = T, invert = T)
+regData.donr.cor <- cor(regData$DAMT, regData[regData.donr.cn.num])
+# View results
+round(regData.donr.cor, digits = 4)
+# Produce plot of correlation between 'regData.donr$DAMT' and numeric variables
+corrplot(cor(regData$DAMT, regData[regData.donr.cn.num]), 
+         tl.col = "black", tl.cex = 0.8, tl.srt = 45)
+
+
+
+
+########################################
+## Exercise 4
+## Data Preparation
+########################################
+
+## Part A - Resolve Missing Values
+
+# HINC - Make a level 0 and code missing values as 0
+levels(regData$HINC) = c(levels(regData$HINC),"0")
+regData$HINC[is.na(regData$HINC)] = "0"
+table(regData$HINC,useNA="ifany")
+
+# GENDER - Assign A, J, and NA to category U
+idxMF = regData$GENDER %in% c("M","F")
+head(idxMF)
+tail(idxMF)
+sum(!idxMF)
+#129 people neither male nor female 
+regData$GENDER[!idxMF] = "U" #assign u to those 129 people
+regData$GENDER = factor(regData$GENDER) # drop a and j
+table(regData$GENDER)
+
+# RFA_96 - Make a level XXX and code missing values as XXX
+levels(regData$RFA_96) = c(levels(regData$RFA_96),"XXX")
+regData$RFA_96[is.na(regData$RFA_96)] = "XXX"
+table(regData$RFA_96,useNA="ifany")
+
+## Part B - Derived or Transformed Variables
+#Not transformations
+
+
+
+## Part C - Re-categorize Variables
+
+# Separate RFA Values (R = recency, F = frequency, A = amount)
+# Note: I wrote a function (separateRFA) to perform these steps.
+separateRFA = function(xData,varName)
+{
+  bytes = c("R","F","A")
+  newVarNames = paste(varName,bytes, sep="_")
+  
+  for (ii in 1:length(bytes)) # Loop over 1 to 3 (corresponding to R, F, and A)
+  {
+    # Find the unique values for current byte
+    byteVals = unique(substr(levels(xData[,varName]),ii,ii))
+    
+    for (jj in 1:length(byteVals)) # Loop over unique byte values
+    {
+      rowIdx = substr(xData[,varName],ii,ii) == byteVals[jj]
+      xData[rowIdx,newVarNames[ii]] = byteVals[jj]
+    }
+    
+    xData[,newVarNames[ii]] = factor(xData[,newVarNames[ii]])
+  }
+  
+  return(xData)
+}
+
+# Apply separateRFA to the variables RFA_96 and RFA_97
+regData = separateRFA(regData,"RFA_96")
+regData = separateRFA(regData,"RFA_97")
+
+# Check the results
+table(regData$RFA_96,regData$RFA_96_R)
+table(regData$RFA_96,regData$RFA_96_F)
+table(regData$RFA_96,regData$RFA_96_A)
+table(regData$RFA_97,regData$RFA_97_R)
+table(regData$RFA_97,regData$RFA_97_F)
+table(regData$RFA_97,regData$RFA_97_A)
+
+
+########################################
+## Exercise 5
+## Dataset Partitioning
+########################################
+
+testFraction = 0.25   # specify the fraction of data to use in the hold-out test 
+set.seed(123)
+
+# Logical 
+# - the index vector has length equal to the number of observations 
+# - the index values are boolean (TRUE and FALSE)
+# - TRUE = use that row in the sample, FALSE = do not use that row in the sample
+trainIdx = sample(c(TRUE,FALSE),size=nrow(regData2),replace=TRUE,
+                  prob=c(1-testFraction,testFraction))
+summary(testFraction)
+table(testFraction)
+sum(trainIdx)
+# Note that the order needs to match between (TRUE, FALSE) and (1-testFraction,testFraction).
+# The TRUEs will be sampled at a rate of 0.75 to indicate use in the training set.
+# The FALSEs will be sampled at a rate of 0.25 to indicate use in the test set 
+# (FALSE = not to be included in the training set = included in the test set).
+
+########################################
+## Exercise 6
+## Model Fitting
+########################################
+## Part A - Simple Linear Regression
+modelA1 = lm(DAMT ~ LASTGIFT,data=regData2,subset=trainIdx)
+summary(modelA1)
+par(mfrow=c(2,2))
+plot(modelA1)
+# Note: Observation 2692 appears to be a high-leverage point (or outlier) for this
+# particular model. I will fit this model again excluding that observation.
+
+# Version 2 indexing:
+tmpIdx = trainIdx[-which(trainIdx == 2692)]
+
+#taking out outlier
+modelA2 = lm(DAMT ~ LASTGIFT,data=regData2,subset=tmpIdx)
+summary(modelA2)
+par(mfrow=c(2,2))
+plot(modelA2)
+par(mfrow=c(1,1))
+
+# Full Regression Model (minus ID which is not to be used as a predictor)
+modelB1 = glm(DAMT ~ AGE+HOME+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON,data=regData2,subset=trainIdx)
+summary(modelB1)
+
+# Forward Stepwise Selection 
+# Using k-fold cross-validation to select number of variables.
+
+# Set up k folds.
+k = 10
+set.seed(36)
+foldNum = sample(1:k,nrow(regData2[trainIdx,]),replace=TRUE)
+barplot(table(foldNum),xlab="Fold #",ylab="Count")  # check results
+
+
+varsToUse = names(regData2)[c(1:14)]
+print(varsToUse)
+maxVars = length(varsToUse)
+
+# Create a matrix to hold the k-fold MSE. Initialize with all NAs
+# One row for each fold (k columns), one column for each size model
+kValErrors = matrix(NA,k,maxVars,
+                    dimnames=list(paste("Fold",1:k),paste(1:maxVars,"Vars")))
+
+# Prediction function from Section 6.5.3 of ISLR
+predict.regsubsets = function(object,newdata,id,...)
+{
+  form = as.formula(object$call[[2]])
+  mat = model.matrix(form,newdata)
+  coefi = coef(object,id=id)
+  xvars = names(coefi)
+  result = mat[,xvars] %*% coefi
+  return(result)
+}
+
+# Loop over the folds
+for (kk in 1:k)
+{
+  # Define formula to include all of the variables in varsToUse
+  myFormula = paste("DAMT ~ ",paste(varsToUse,collapse=" + "),sep="")
+  
+  # Train on all folds except fold kk.
+  regfit_bestCV = regsubsets(as.formula(myFormula), 
+                             data=regData2[trainIdx,][foldNum!=kk,],
+                             nvmax=maxVars, method="forward")
+  
+  # Loop over number of variables (model size).
+  for (jj in 1:maxVars)
+  {
+    # Predict on validation folds (Fold == kk) and calculate validation MSE
+    kValPred = predict(regfit_bestCV,regData2[trainIdx,][foldNum==kk,],id=jj)
+    kValErrors[kk,jj] = mean( (regData2$DAMT[trainIdx][foldNum==kk]-kValPred)^2 )
+  }
+}
+
+# Average cv_errors down the columns using the apply() method
+meanValError = apply(kValErrors,2,mean)
+plot(meanValError,type='b',xlab='# Variables',ylab='MSE',main='Validation Data')
+bestModel = which.min(meanValError)
+points(bestModel,meanValError[bestModel],col="red",cex=2,pch=20)
+
+# When I ran this code, the minimum error was with a single variable (your results
+# may be different). This is not entirely surprising, but it does seem somewhat 
+# anti-climactic. Looking beyond 1 variable, the MSE is much larger for the 2- and 
+# 3-variable models. The MSE drops down at the 8-variable model and remains basically
+# flat (although increasing slightly) as additional variables are added. For the 
+# sake of illustrating the process, I am going to move forward with the 4-variable
+# model.
+
+# Re-fit the forward selection models to all folds of the training data.
+regfit_best = regsubsets(as.formula(myFormula), data=regData2[trainIdx,],
+                         nvmax=maxVars, method="forward")
+summary(regfit_best)
+coef(regfit_best,3)
+
+# I am going to fit the best model (the 3 variables selected above) as an LM object. 
+# This is for the purpose of model portability in the downstream code. Note that
+# coefficients in my LM should match the coefficients from regfit_best above.
+modelB2 = lm(DAMT ~ RAMNTALL + NGIFTALL + MAXRAMNT,data=regData2,subset=trainIdx)
+summary(modelB2)
+coef(modelB2)
+par(mfrow=c(2,2))
+plot(modelB2)
+par(mfrow=c(1,1))
+
+
+#c
+regX = model.matrix(DAMT ~ AGE+HOME+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON,data=regData2)[,-1]
+regY = regData2$DAMT
+cvLasso = cv.glmnet(regX[trainIdx,],regY[trainIdx],alpha=1)
+plot(cvLasso)
+
+
+modelC1 = glmnet(regX[trainIdx,],regY[trainIdx],alpha=1,lambda=cvLasso$lambda.min)
+coef(modelC1)
+
+
+
+fullTree = tree(DAMT ~ AGE+HOME+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON,data=regData2,subset=trainIdx)
+summary(fullTree)
+plot(fullTree)
+
+text(fullTree,pretty=0)
+
+# Prune the tree
+cvTree = cv.tree(fullTree)
+plot(cvTree$size ,cvTree$dev ,type="b")
+
+modelD1 = prune.tree(fullTree,best=4)
+summary(modelD1)
+par(mfrow=c(1,1))
+plot(modelD1)
+text(modelD1,pretty=0)
+
+modelD2 = randomForest(DAMT ~ AGE+HOME+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON,data=regData2,subset=trainIdx,mtry=7,
+                       importance =TRUE)
+summary(modelD2)
+varImpPlot(modelD2)
+coef(modelD2)
+
+
+calcMSE = function(model,modelLabel,dataSet,trainIdx,newX=NULL)
+{
+  # The predict method for glmnet will need to be called differently from the
+  # other predict methods.
+  if ("glmnet" %in% class(model)) {
+    predVals = predict(model,newX,type="response")
+  } else {
+    predVals = predict(model,dataSet)
+  }
+  MSE = list(
+    name = modelLabel,
+    train = mean( (predVals[trainIdx] - dataSet$DAMT[trainIdx])^2 ),
+    test = mean( (predVals[-trainIdx] - dataSet$DAMT[-trainIdx])^2 )
+  )
+  
+  return(MSE)
+}
+
+modelMSEs = data.frame(Model = rep(NA,8),Train.MSE = rep(NA,8),Test.MSE = rep(NA,8))
+
+modelMSEs[1,] = calcMSE(modelA1,"A1",regData2,trainIdx)
+modelMSEs[2,] = calcMSE(modelA2,"A2",regData2,trainIdx)
+modelMSEs[3,] = calcMSE(modelB1,"B1",regData2,trainIdx)
+modelMSEs[4,] = calcMSE(modelB2,"B2",regData2,trainIdx)
+modelMSEs[5,] = calcMSE(modelC1,"C1",regData2,trainIdx,newX=regX)
+modelMSEs[6,] = calcMSE(modelC2,"C2",regData2,trainIdx,newX=regX)
+modelMSEs[7,] = calcMSE(modelD1,"D1",regData2,trainIdx)
+modelMSEs[8,] = calcMSE(modelD2,"D2",regData2,trainIdx)
+
+print(modelMSEs)
+
+data(regData2)
+
+
+#####################
+#Part 2####
+#####################
+# Clear workspace
+rm(list=ls())
+
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(corrplot)
+library(doParallel)
+library(forecast)
+library(knitr)
+library(missForest)
+library(DescTools)
+library(pROC)
+library(glmnet)
+library(rpart)
+library(e1071)
+library(boot)
+library(tree)
+getwd()
+setwd("/Users/rachellevy/Desktop/School/422/Charity Project Part 2")
+
+
+########################################
+## Exercise 1
+## Read Data from CSV File
+########################################
+inPath = file.path("/Users/rachellevy/Desktop/School/422/Charity Project Part 2")
+ClassData = read.csv(file.path(inPath,"projectDataPart2.csv"),na.strings=c("NA"," "), stringsAsFactors = TRUE)
+
+# Convert categorical variables to factors
+# DONR = binary indicator for response to mailing
+ClassData$DONR <- as.factor(ClassData$DONR)
+# HOME = binary indicator variable for owning a home
+ClassData$HOME <- as.factor(ClassData$HOME)
+# HINC = household income
+ClassData$HINC <- as.factor(ClassData$HINC)
+
+########################################
+## Exercise 2
+## Data Quality Check
+########################################
+
+dim(ClassData)      # dimensions of data
+names(ClassData)    # variable names
+str(ClassData)      # one form of summary of data
+summary(ClassData)  # another form of summary
+
+## Check for Missing Values
+which(sapply(ClassData,anyNA))
+
+# Missing values identified in HINC, GENDER, and RFA_96
+# Get counts of missing values for each variable
+table(ClassData$HINC,useNA="ifany")
+table(ClassData$GENDER,useNA="ifany")
+table(ClassData$RFA_96,useNA="ifany")
+
+########################################
+## Exercise 3
+## Exploratory Data Analysis
+########################################
+
+# summarize the class distribution
+percentage <- prop.table(table(ClassData$DONR)) * 100
+cbind(freq=table(ClassData$DONR), percentage=percentage)
+
+# Counts of the response variable DONR
+table(ClassData$DONR)
+barplot(table(ClassData$DONR),xlab="DONR")
+
+# Counts for a categorical predictor variable
+table(ClassData$GENDER,useNA="ifany")
+barplot(table(ClassData$GENDER,useNA="ifany"),main="Gender")
+
+
+# Boxplot of AGE by DONR status
+# In order for R to make this into a boxplot, DONR needs to be a factor variable
+# and DONR needs to be plotted on the horizontal axis.
+summary(ClassData)
+par(mfrow=c(1,1))
+plot(ClassData$DONR,ClassData$AGE,xlab="DONR",ylab="AGE", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$MEDHVAL,xlab="DONR",ylab="MEDHVAL In Hundreds", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$MEDPPH,xlab="DONR",ylab="MEDPPH", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$MEDEDUC,xlab="DONR",ylab="MEDED", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$MEDINC,xlab="DONR",ylab="Income", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$NUMPROM,xlab="DONR",ylab="NUMPROM", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$NUMPRM12,xlab="DONR",ylab="NUMPRM12", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$RAMNTALL,xlab="DONR",ylab="AMNTALL", varwidth=FALSE)
+plot(ClassData$DONR, ClassData$NGIFTALL,xlab="DONR",ylab="NGIFTALL", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$MAXRAMNT,xlab="DONR",ylab="AMNTALL", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$LASTGIFT,xlab="DONR",ylab="LastGift", varwidth=FALSE)
+plot(ClassData$DONR,ClassData$TDON,xlab="DONR",ylab="TDON", varwidth=FALSE)
+
+
+plot(ClassData$GENDER,ClassData$DONR,xlab="GENDER",ylab="DONR",main="Mosaic Plot")
+# These graphs show that M/F doesn't show any difference in DONR status.
+plot(ClassData$DONR,ClassData$HOME,xlab="DONR",ylab="HOME",main="Mosaic Plot")
+plot(ClassData$DONR,ClassData$HINC,xlab="DONR",ylab="HINC",main="Mosaic Plot")
+
+########################################
+## Exercise 4
+## Data Preparation
+########################################
+
+## Part A - Resolve Missing Values
+
+# HINC - Make a level 0 and code missing values as 0
+levels(ClassData$HINC) = c(levels(ClassData$HINC),"0")
+ClassData$HINC[is.na(ClassData$HINC)] = "0"
+table(ClassData$HINC,useNA="ifany")
+
+# GENDER - Assign A, J, and NA to category U
+idxMF = ClassData$GENDER %in% c("M","F")
+ClassData$GENDER[!idxMF] = "U"
+ClassData$GENDER = factor(ClassData$GENDER)
+table(ClassData$GENDER)
+
+# RFA_96 - Make a level XXX and code missing values as XXX
+levels(ClassData$RFA_96) = c(levels(ClassData$RFA_96),"XXX")
+ClassData$RFA_96[is.na(ClassData$RFA_96)] = "XXX"
+table(ClassData$RFA_96,useNA="ifany")
+
+## Part B - Derived or Transformed Variables
+# Derived
+# Create lifetime promotion-to-gifts ratio
+# Average of number of promotions sent for each gift
+# Rounding off to whole number; cannot get 5.5 promotions
+ClassData$PROMGIFT <- round(ClassData$NUMPROM / ClassData$NGIFTALL, digits = 0)
+# Create lifetime gift-to-promotion rate
+# Conversion rate, or effectiveness rate
+ClassData$GIFTPROM <- ClassData$NGIFTALL / ClassData$NUMPROM
+# Create mean donation amount
+ClassData$MEANAMT <- ClassData$RAMNTALL / ClassData$NGIFTALL
+head(ClassData$MEANAMT)
+
+plot(ClassData2$DONR,ClassData$GIFTPROM,xlab="DONR",ylab="GIFTPROM", varwidth=FALSE)
+plot(ClassData2$DONR,ClassData$MEANAMT,xlab="DONR",ylab="MEANAMT", varwidth=FALSE)
+plot(ClassData2$DONR,ClassData$PROMGIFT,xlab="DONR",ylab="PROMGIFT", varwidth=FALSE)
+
+
+## Part C - Re-categorize Variables
+# Separate RFA Values (R = recency, F = frequency, A = amount)
+# Note: I wrote a function (separateRFA) to perform these steps.
+separateRFA = function(xData,varName)
+{
+  bytes = c("R","F","A")
+  newVarNames = paste(varName,bytes, sep="_")
+  
+  for (ii in 1:length(bytes)) # Loop over 1 to 3 (corresponding to R, F, and A)
+  {
+    # Find the unique values for current byte
+    byteVals = unique(substr(levels(xData[,varName]),ii,ii))
+    
+    for (jj in 1:length(byteVals)) # Loop over unique byte values
+    {
+      rowIdx = substr(xData[,varName],ii,ii) == byteVals[jj]
+      xData[rowIdx,newVarNames[ii]] = byteVals[jj]
+    }
+    
+    xData[,newVarNames[ii]] = factor(xData[,newVarNames[ii]])
+  }
+  
+  return(xData)
+}
+# Apply separateRFA to the variables RFA_96 and RFA_97
+ClassData = separateRFA(ClassData,"RFA_96")
+ClassData = separateRFA(ClassData,"RFA_97")
+# Check the results
+table(ClassData$RFA_96,ClassData$RFA_96_R)
+table(ClassData$RFA_96,ClassData$RFA_96_F)
+table(ClassData$RFA_96,ClassData$RFA_96_A)
+table(ClassData$RFA_97,ClassData$RFA_97_R)
+table(ClassData$RFA_97,ClassData$RFA_97_F)
+table(ClassData$RFA_97,ClassData$RFA_97_A)
+
+#Part 4
+dropIdx = which(names(ClassData) %in% c("DAMT","GENDER", "ID"))
+# Drop the variables indicated by dropIdx.
+ClassData2 = ClassData[,-dropIdx]
+names(ClassData2)  
+
+########################################
+## Exercise 5
+## Dataset Partitioning
+########################################
+
+testFraction = 0.25   # specify the fraction of data to use in the hold-out test 
+set.seed(123)
+# - the index vector has length equal to the number of observations 
+# - the index values are boolean (TRUE and FALSE)
+# - TRUE = use that row in the sample, FALSE = do not use that row in the sample
+trainIdx = sample(c(TRUE,FALSE),size=nrow(ClassData2),replace=TRUE,
+                  prob=c(1-testFraction,testFraction))
+table(trainIdx,useNA="ifany")
+
+
+########################################
+## Exercise 6
+## Model Fitting
+########################################
+
+modelA1 = glm(DONR ~ GIFTPROM,data=ClassData2,subset=trainIdx,family=binomial)
+summary(modelA1)
+par(mfrow=c(2,2))
+plot(modelA1)
+par(mfrow=c(1,1))
+trnProbsA1 = predict(modelA1,type="response")
+hist(trnProbsA1,col="gray")   # Note that scores are distributed around 0.05.
+hist(trnProbsA1,col="gray",xlim=c(0,1))   # Rescale to make obvious.
+# ROC Curve for Model A1 - Use methods from pROC package.
+rocA1 = roc(response=ClassData2$DONR[trainIdx],predictor=trnProbsA1)
+par(pty="s")  # sets plotting region to a square, useful for ROC curves
+# Use par(pty="m") to return to default of rectangular plotting region.
+plot(rocA1,col="blue",
+     main=paste("ROC curve for Model A1\nAUC = ",round(rocA1$auc,digits=3),sep=""))
+par(pty="m")
+dist01a = sqrt((rocA1$specificities-1)^2 + (rocA1$sensitivities-1)^2)
+optIdxA1 = which.min(dist01a)  # index corresponding to minimum distance
+threshA1 = rocA1$thresholds[optIdxA1]  # threshold corresponding to min. distance
+points(rocA1$specificities[optIdxA1],rocA1$sensitivities[optIdxA1],col="red",pch=7)
+
+modelA2 = glm(DONR ~ LASTGIFT,data=ClassData2,subset=trainIdx,family=binomial)
+summary(modelA2)
+par(mfrow=c(2,2))
+plot(modelA2)
+par(mfrow=c(1,1))
+trnProbsA2 = predict(modelA2,type="response")
+hist(trnProbsA2,col="gray")   # Note that scores are distributed around 0.05.
+hist(trnProbsA2,col="gray",xlim=c(0,1))   # Rescale to make obvious.
+# ROC Curve for Model A1 - Use methods from pROC package.
+rocA2 = roc(response=ClassData2$DONR[trainIdx],predictor=trnProbsA2)
+par(pty="s")  # sets plotting region to a square, useful for ROC curves
+# Use par(pty="m") to return to default of rectangular plotting region.
+plot(rocA2,col="blue",
+     main=paste("ROC curve for Model A2\nAUC = ",round(rocA2$auc,digits=3),sep=""))
+par(pty="m")
+dist01b = sqrt((rocA2$specificities-1)^2 + (rocA2$sensitivities-1)^2)
+optIdxA2 = which.min(dist01b)  # index corresponding to minimum distance
+threshA2 = rocA2$thresholds[optIdxA2]  # threshold corresponding to min. distance
+points(rocA2$specificities[optIdxA2],rocA2$sensitivities[optIdxA2],col="red",pch=7)
+
+
+names(ClassData2)
+
+# Full Regression Model (minus ID which is not to be used as a predictor)
+modelB1 = glm(DONR ~ .,data=ClassData2,subset=trainIdx,family=binomial)
+summary(modelB1)
+par(mfrow=c(2,2))
+plot(modelB1)
+par(mfrow=c(1,1))
+# ROC Curve for Model B1 - Use methods from pROC package.
+trnProbsB1 = predict(modelB1,type="response")
+rocB1 = roc(response=ClassData2$DONR[trainIdx],predictor=trnProbsB1)
+par(pty="s")  # sets plotting region to a square, useful for ROC curves
+plot(rocB1,col="blue",
+     main=paste("ROC curve for Model B1\nAUC = ",round(rocB1$auc,digits=3),sep=""))
+par(pty="m")
+# Determine "optimal" threshold.
+dist01 = sqrt((rocB1$specificities-1)^2 + (rocB1$sensitivities-1)^2)
+optIdxB1 = which.min(dist01)  # index corresponding to minimum distance
+threshB1 = rocB1$thresholds[optIdxB1]  # threshold corresponding to min. distance
+points(rocB1$specificities[optIdxB1],rocB1$sensitivities[optIdxB1],col="red",pch=7)
+
+
+#b2
+modelB2 = glm(DONR ~ HINC+MEDHVAL+LASTGIFT+TDON+GIFTPROM,data=ClassData2,subset=trainIdx,family=binomial)
+summary(modelB2)
+par(mfrow=c(2,2))
+plot(modelB2)
+plot(predict(modelB2),residuals(modelB2),col=c("blue","red"))
+abline(h=0,lty=2,col="grey")
+par(mfrow=c(1,1))
+# ROC Curve for Model B21 - Use methods from pROC package.
+trnProbsB2 = predict(modelB2,type="response")
+rocB2 = roc(response=ClassData2$DONR[trainIdx],predictor=trnProbsB2)
+par(pty="s")  # sets plotting region to a square, useful for ROC curves
+plot(rocB2,col="blue",
+     main=paste("ROC curve for Model B2\nAUC = ",round(rocB2$auc,digits=3),sep=""))
+par(pty="m")
+# Determine "optimal" threshold.
+dist02b = sqrt((rocB2$specificities-1)^2 + (rocB2$sensitivities-1)^2)
+optIdxB2 = which.min(dist02b)  # index corresponding to minimum distance
+threshB2 = rocB2$thresholds[optIdxB2]  # threshold corresponding to min. distance
+points(rocB2$specificities[optIdxB2],rocB2$sensitivities[optIdxB2],col="red",pch=7)
+
+##C Tree model
+fullTree = rpart(DONR ~  HINC+MEDHVAL+LASTGIFT+TDON+GIFTPROM+PROMGIFT,
+                 data=ClassData2,subset=trainIdx,method="class",
+                 parms=list(split="gini",loss=matrix(c(0,15.62,0.68,0),nrow=2,ncol=2)))
+summary(fullTree)
+plot(fullTree)
+text(fullTree)
+
+# Prune the tree
+printcp(fullTree)
+cpBest = fullTree$cptable[which.min(fullTree$cptable[,"xerror"]),"CP"]
+modelC1 = prune(fullTree,cp=cpBest) # In this case, the optimal tree is the unpruned tree
+summary(modelC1)
+plot(modelC1)
+text(modelC1,pretty=0)
+
+#d
+svmRadial = svm(DONR ~HINC+MEDHVAL+LASTGIFT+TDON+PROMGIFT,data=ClassData2,
+                subset=trainIdx,kernel="radial")
+summary(svmRadial)
+
+# Note: It will take a while to plot all data points. I recommend taking a random
+# sample for the sake of speedier visualization.
+if (class(trainIdx) %in% c("integer","numeric")) # trainIdx is numeric
+{
+  sampleIdx = sample(trainIdx,size=0.1*length(trainIdx))
+} else # trainIdx is logical
+{
+  sampleIdx = sample(which(trainIdx),size=0.1*sum(trainIdx))
+}
+plot(svmRadial,data=ClassData2[sampleIdx,],LASTGIFT~PROMGIFT)
+
+tuneLinear=tune(svm,DONR ~HINC+MEDHVAL+LASTGIFT+TDON+GIFTPROM+PROMGIFT,
+                data=ClassData2[trainIdx,],kernel="linear",
+                ranges=list(cost=c(1,5)),sampling="fix")
+# summary(tuneLinear)
+modelD1 = svmRadial
+
+########################################
+## Exercise 7
+## Model Validation
+########################################
+
+# For each model, I will generate predictions for all data (Train and Test). I
+# will then calculate the Train and Test Classification Accuracy, Confusion Matrices,
+# and TP and FP Rates by subsetting the predictions accordingly. The following 
+# functions will perform those tasks for me.
+assignClass = function(probVals,threshVal)
+{
+  predVals = rep(0,length(probVals))
+  predVals[probVals > threshVal] = 1
+  predVals = factor(predVals)
+  
+  return(predVals)
+}
+
+calcMetrics = function(targetVals,predVals)
+{
+  confMat = table(targetVals,predVals,dnn=c("Target","Predicted"))
+  
+  classResults = list(
+    confMat = confMat,
+    TPrate = round(confMat[2,2] / sum(confMat[2,]),digits=4),
+    FPrate = round(confMat[1,2] / sum(confMat[1,]),digits=4),
+    accuracy = round(mean(targetVals == predVals),digits=2)
+  )
+  
+  return(classResults)
+}
+
+calcResults = function(model,modelLabel,dataSet,trainIdx,threshVal=NULL)
+{
+  if (!is.null(threshVal) & "glm" %in% class(model)) {
+    # Predict for glm models
+    probVals = predict(model,dataSet,type="response")
+    predVals = assignClass(probVals,threshVal)
+  } else if (length(intersect(class(model),c("tree","rpart","randomForest")) > 0)) {
+    # Predict for tree, rpart, randomForest models
+    predVals = predict(model,dataSet,type="class")
+  } else if (length(intersect(class(model),c("lda")) > 0)) {
+    # Predict for lda models
+    predVals = predict(model,dataSet)$class
+  } else if (length(intersect(class(model),c("svm")) > 0)) {
+    # Predict for svm models
+    predVals = predict(model,dataSet)
+  }
+  
+  results = list(
+    name = modelLabel,
+    train = calcMetrics(ClassData2$DONR[trainIdx],predVals[trainIdx]),
+    test = calcMetrics(ClassData2$DONR[-trainIdx],predVals[-trainIdx])
+  )
+  
+  return(results)
+}
+
+nModels = 5 # Number of models you fit. I fit 4 models in this sample code.
+naTmp = rep(NA,nModels) # Code short-hand.
+nanTmp = rep(NaN,nModels)
+modelMetrics = data.frame(
+  Model = naTmp,
+  Train.Accuracy = nanTmp, Train.TP = nanTmp, Train.FP = nanTmp,
+  Test.Accuracy = nanTmp, Test.TP = nanTmp, Test.FP = nanTmp
+)
+
+
+resultsA1 = calcResults(modelA1,"A1",ClassData2,trainIdx,threshA1)
+print(resultsA1$test$confMat)
+modelMetrics[1,] = c(resultsA1$name,
+                     resultsA1$train$accuracy,resultsA1$train$TPrate,resultsA1$train$FPrate,
+                     resultsA1$test$accuracy,resultsA1$test$TPrate,resultsA1$test$FPrate)
+resultsA2 = calcResults(modelA2,"A2",ClassData2,trainIdx,threshA2)
+print(resultsA2$test$confMat)
+modelMetrics[2,] = c(resultsA2$name,
+                     resultsA2$train$accuracy,resultsA1$train$TPrate,resultsA2$train$FPrate,
+                     resultsA2$test$accuracy,resultsA1$test$TPrate,resultsA2$test$FPrate)
+
+resultsB1 = calcResults(modelB1,"B1",ClassData2,trainIdx,threshB1)
+print(resultsB1$test$confMat)
+modelMetrics[3,] = c(resultsB1$name,
+                     resultsB1$train$accuracy,resultsB1$train$TPrate,resultsB1$train$FPrate,
+                     resultsB1$test$accuracy,resultsB1$test$TPrate,resultsB1$test$FPrate)
+resultsB2 = calcResults(modelB2,"B2",ClassData2,trainIdx,threshB2)
+print(resultsB2$test$confMat)
+modelMetrics[4,] = c(resultsB2$name,
+                     resultsB2$train$accuracy,resultsB1$train$TPrate,resultsB2$train$FPrate,
+                     resultsB2$test$accuracy,resultsB1$test$TPrate,resultsB2$test$FPrate)
+
+resultsC1 = calcResults(modelC1,"C1",ClassData2,trainIdx)
+print(resultsC1$test$confMat)
+modelMetrics[5,] = c(resultsC1$name,
+                     resultsC1$train$accuracy,resultsC1$train$TPrate,resultsC1$train$FPrate,
+                     resultsC1$test$accuracy,resultsC1$test$TPrate,resultsC1$test$FPrate)
+
+resultsD1 = calcResults(modelD1,"D1",ClassData2,trainIdx)
+print(resultsD1$test$confMat)
+modelMetrics[6,] = c(resultsD1$name,
+                     resultsD1$train$accuracy,resultsD1$train$TPrate,resultsD1$train$FPrate,
+                     resultsD1$test$accuracy,resultsD1$test$TPrate,resultsD1$test$FPrate)
+print(modelMetrics)
+
+
+#Part 3 Putting it all together
+# Clear workspace
+rm(list=ls())
+
+getwd()
+setwd("/Users/rachellevy/Desktop/School/422/Charity Project Part 3")
+
+
+
+# Load packages required for this code.
+library(leaps)
+library(glmnet)
+library(tree)
+library(randomForest)
+library(rpart)
+library(e1071)
+
+########################################
+## Exercise 1
+## Read Data from CSV File
+########################################
+
+# This path is specified wrt a Mac, the Windows path will start differently
+inPath = file.path("/Users/rachellevy/Desktop/School/422/Charity Project Part 3")
+valData = read.csv(file.path(inPath,"projectDataPart3.csv"),na.strings=c("NA"," "))
+
+# Convert categorical variables to factors
+# This is highly recommended so that R treats the variables appropriately.
+# The lm() method in R can handle a factor variable without us needing to convert 
+# the factor to binary dummy variable(s).
+valData$DONR = as.factor(valData$DONR)
+valData$HOME = as.factor(valData$HOME)
+valData$HINC = as.factor(valData$HINC)
+
+########################################
+## Exercise 2
+## Predictions on Validation Set
+########################################
+
+# Make sure you have altered the functions processPart1 and processPart2 in 
+# DataPreparation.R to match the data processing steps you took in Parts 1 and 2
+# of the project.
+
+# Make sure you have saved your models from Part 1 and Part 2 using the examples given
+# in SaveYourModels.R before you begin this exercise.
+
+# "Source" the file DataPrepration.R in order to put the data processing functions
+# into memory. Define the file path to be the location of the file DataPreparation.R.
+codePath = file.path("/Users/rachellevy/Desktop/School/422/Charity Project Part 3")
+source(file.path(codePath,"DataPreparation.R"))
+
+## Part A - Apply the Part 1 data processing steps to valData
+valDataPart1 = processPart1(valData)
+
+# Note that RFA_96_A for valData does not include the level "B". I had to do some 
+# investigating to track down an error that originated from this fact. Therefore, we
+# will add the level so that we don't have problems with making predictions.
+levels(valDataPart1$RFA_96_A) = c(levels(valDataPart1$RFA_96_A), "B")
+
+## Part B - Predict DAMT for valData using your chosen model from Part 1
+modelPath = file.path("/Users/rachellevy/Desktop/School/422/Charity Project Models")
+load(file.path(modelPath,"modelPart1.RData"))
+
+# Note that the model I am using is a glmnet model. I must call the predict function
+# using the syntax for a glmnet model. Search for help on predict.glmnet for details.
+# You can type class(modelPart1) on the command line (after you have loaded the model)
+# to determine the class of the model.
+
+x = model.matrix(DAMT ~ AGE+HOME+MEDINC+MEDEDUC+NUMPROM+RAMNTALL+NGIFTALL+MAXRAMNT+LASTGIFT+TDON,data=valDataPart1)
+valData$DAMT.Pred = as.numeric(predict(modelPart1,new=x,type="response"))
+
+# Check the predictions as a sanity check
+hist(valData$DAMT.Pred,xlab="DAMT",main="Validation Set",col="gray",breaks=50)
+par(pty="s")
+plot(valData$DAMT,valData$DAMT.Pred,xlab="Target DAMT",ylab="Predicted DAMT",
+     main="Validation Set")
+abline(0,1,col="red")
+par(pty="m")
+
+## Part C - Apply the Part 2 data processing steps to valData
+valDataPart2 = processPart2(valData)
+levels(valDataPart2$RFA_96_A) = c(levels(valDataPart2$RFA_96_A), "B")
+
+## Part D - Predict DONR and PDONR for valData using your chosen model from Part 2
+# Recall DONR = 0 or 1 is the predicted class and PDONR in [0,1] is the predicted 
+# probability.
+load(file.path(modelPath,"modelPart2.RData"))
+
+# Note that the model I am using is a rpart model. I must call the predict function
+# using the syntax for a rpart model. Search for help on predict.rpart for details.
+# You can type class(modelPart2) on the command line (after you have loaded the model)
+# to determine the class of the model.
+#
+# Further note that for predict.rpart, we can obtain the predicted class using the
+# argument type="class" and the predicted probability using the argument type="prob".
+# Each predict method should have some means of obtaining the probabilities. You
+# will have to check the documentation for the type of model you are using to 
+# determine the appropriate syntax.
+valData$DONR.Pred = predict(modelPart2,newdata=valDataPart2,type="class")
+valData$PDONR.Pred = predict(modelPart2,newdata=valDataPart2,type="prob")[,2]
+
+# Check the predictions as a sanity check
+table(valData$DONR,valData$DONR.Pred,dnn=c("Target","Predicted"))
+hist(valData$PDONR.Pred,xlab="P(DONR=1)",main="Validation Set",col="gray",breaks=50,
+     xlim=c(0,1))
+plot(valData$DONR,valData$PDONR.Pred,xlab="Target DONR Value",
+     ylab="Predicted P(DONR=1)",main="Validation Set")
+
+########################################
+## Exercise 3
+## Mailing List Selection
+########################################
+
+# "Source" the file RankedDonorOutput.R in order to put the function 
+# outputForRankedDonors into memory. It is assumed here that all of your R code
+# for this part of the project is located in one file directory.
+source(file.path(codePath,"RankedDonorOutput.R"))
+
+## Evaluate various mailing list strategies using function outputForRankedDonors
+
+# Rank donors by PDONR.Pred
+numBins = 10
+out1 = outputForRankedDonors(numBins,rankVar="PDONR.Pred",dataToRank=valData)
+print(out1$Donor.Table)
+print(out1$Mailing.Table)
+
+# Rank donors by EXAMT.Pred (expected donation amount)
+# EXAMT.Pred = PDONR.Pred * DAMT.Pred 
+# (likelihood of donation * predicted donation amount)
+valData$EXAMT.Pred = valData$PDONR.Pred * valData$DAMT.Pred
+out2 = outputForRankedDonors(numBins,rankVar="EXAMT.Pred",dataToRank=valData)
+print(out2$Donor.Table)
+print(out2$Mailing.Table)
+
+# Plot profit profiles
+# Note, the following code is minorly complicated by the fact that there may be
+# fewer than numBins unique PDONR values. I have worked out the complications, but
+# it makes the x-axis for the plot a bit less intuitive.
+
+# Calculate percentiles of breakVals for each profile using the empircal CDF function.
+fn1 = ecdf(out1$breakVals)
+fn2 = ecdf(out2$breakVals)
+yLimits = c(0,500+1000*ceiling(max(c(out1$Mailing.Table$Total.Profit,out2$Mailing.Table$Total.Profit))/1000))
+plot(fn1(out1$breakVals)[-1],out1$Mailing.Table$Total.Profit,type='b',col="blue",
+     xlab="% Mailed",ylab="Profit ($)",main="Profit Profiles",xlim=c(0,1),ylim=yLimits)
+lines(fn2(out2$breakVals)[-1],out2$Mailing.Table$Total.Profit,col="red")
+points(fn2(out2$breakVals)[-1],out2$Mailing.Table$Total.Profit,col="red",pch=16)
+legend(x="topleft",legend=c("PDONR","EXAMT"),col=c("blue","red"),lty=c(1,1),pch=c(1,16))
+
+# Currently, I am seeing that the highest profit is obtained by mailing everyone.
+# Note that the donation and profit values are measured from the known target data.
+# However, the potential for profit is driven by the RANKING of individuals within
+# the dataset. The ranking is determined by the choice of metric (e.g. EXAMT) and 
+# by your models' predicted values. A different choice of models might re-order the
+# individuals so that more individuals worth mailing work their way towards the top
+# and a higher profit is obtained from mailing fewer individuals.
+#
+# For this coding example, suppose selecting the top 7 bins determined by EXAMT.Pred 
+# is deemed to be the  optimal selection criterion (results using your models may 
+# vary). Apply cutoff to valData.
+cutOff = out2$breakVals[numBins+1-7]
+valMailList = data.frame(ID=valData$ID[valData$EXAMT.Pred >= cutOff])
+length(valMailList$ID)
+
+########################################
+## Exercise 4
+## Predictions on Test Set
+########################################
+
+## Part A - Repeat Exercise 1 on projectDataTEST.csv
+testData = read.csv(file.path(inPath,"projectDataTEST.csv"),na.strings=c("NA"," "))
+
+testData$HOME = as.factor(testData$HOME)
+testData$HINC = as.factor(testData$HINC)
+
+## Part B - Repeat Exercise 2 on projectDataTEST.csv
+
+# Note: The model.matrix method will not allow us to use a dataframe with "missing" 
+# columns. Therefore, we add dummy DAMT and DONR columns to testData.
+testData$DAMT = -1
+testData$DONR = -1
+
+## Apply the Part 1 data processing steps to testData
+testDataPart1 = processPart1(testData)
+
+## Predict DAMT for testData using your chosen model from Part 1
+# Note that the model I am using is a glmnet model.
+x = model.matrix(DAMT ~ .-ID,data=testDataPart1)[,-1]
+testData$DAMT.Pred = as.numeric(predict(modelPart1,newx=x,type="response"))
+
+# Check the predictions as a sanity check
+summary(testData$DAMT.Pred)
+
+## Apply the Part 2 data processing steps to valData
+testDataPart2 = processPart2(testData)
+
+## Predict DONR and PDONR for valData using your chosen model from Part 2
+# Note that the model I am using is a rpart model.
+testData$DONR.Pred = predict(modelPart2,newdata=testDataPart2,type="class")
+testData$PDONR.Pred = predict(modelPart2,newdata=testDataPart2,type="prob")[,2]
+
+# Check the predictions as a sanity check
+table(testData$DONR.Pred)
+summary(testData$PDONR.Pred)
+
+## Part C - Write Test Set Predictions to CSV File
+# Name the columns in the CSV file ID, DONR, PDONR, DAMT
+testPredOut = data.frame(ID = testData$ID,
+                         DONR = testData$DONR.Pred,
+                         PDONR = testData$PDONR.Pred,
+                         DAMT = testData$DAMT.Pred)
+
+outPath = file.path("/Users","JLW","Documents","Northwestern MSPA","PREDICT 422",
+                    "Project - Charity Mailing","Project Data Files")
+
+write.csv(testPredOut,file=file.path(outPath,"projectPredictionsTEST.csv"),
+          row.names=FALSE)
+
+## Part D - Apply Mailing List Strategy to Test Data
+# Use cutoff selected above.
+testData$EXAMT.Pred = testData$PDONR.Pred * testData$DAMT.Pred
+testMailList = data.frame(ID=testData$ID[testData$EXAMT.Pred >= cutOff])
+length(valMailList$ID)
+
+## Part E - Write Test Set Mailing List to CSV File
+write.csv(testMailList,file=file.path(outPath,"projectListTEST.csv"),row.names=FALSE)
+
+
+
+
+
